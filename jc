@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+command -v git &> /dev/null || (echo "git not found" >&2 && exit 1)
+command -v curl &> /dev/null || (echo "curl not found" >&2 && exit 1)
+command -v jq &> /dev/null || (echo "jq not found" >&2 && exit 1)
+
+load_config() {
+  local config_file=".jcrc"
+
+  local global_config
+  global_config="${HOME}/.jc/${config_file}"
+  if [[ -f "${global_config}" ]]; then
+    echo "Loading global config ${global_config}" >&2
+    . "${global_config}"
+  fi
+
+  local local_config
+  local_config="$(git rev-parse --show-toplevel)/${config_file}"
+  if [[ -f "${local_config}" ]]; then
+    echo "Loading local config ${local_config}" >&2
+    . "${local_config}"
+  fi
+}
+
+load_config
+
+API_KEY="${JC_API_KEY:?api key is not set}"
+MODEL="${JC_MODEL:?model is not set}"
+GIT_DIFF_ARGS="${JC_GIT_DIFF_ARGS:-}"
+INSTRUCTIONS="${JC_INSTRUCTIONS:?instructions are not set}"
+SAMPLE_INPUT="${JC_SAMPLE_INPUT:?sample input is not set}"
+SAMPLE_OUTPUT="${JC_SAMPLE_OUTPUT:?sample output is not set}"
+
+git_diff() {
+  dir="$(git rev-parse --show-toplevel)"
+
+  if git -C "${dir}" diff-index --cached --quiet HEAD; then
+    echo "Nothing to commit" >&2 && exit 1
+  fi
+
+  cmd="git -C \"${dir}\" diff --no-color --staged ${GIT_DIFF_ARGS}"
+  eval "${cmd}"
+}
+
+git_commit() {
+  local message="$1"
+
+  dir="$(git rev-parse --show-toplevel)"
+  git -C "${dir}" commit --edit -F <(echo "${message}")
+}
+
+ask_openai() {
+  local diff="$1"
+
+  local payload
+  payload=$(jq -n \
+    --arg model "${MODEL}" \
+    --arg instructions "${INSTRUCTIONS}" \
+    --arg sampleInput "${SAMPLE_INPUT}" \
+    --arg sampleOutput "${SAMPLE_OUTPUT}" \
+    --arg diff "${diff}" '
+{
+  model: $model,
+  input: [
+    { role: "system",    content: [ { type: "input_text", text: $instructions } ] },
+    { role: "user",      content: [ { type: "input_text", text: $sampleInput } ] },
+    { role: "assistant", content: [ { type: "output_text", text: $sampleOutput } ] },
+    { role: "user",      content: [ { type: "input_text", text: $diff } ] }
+  ]
+}'
+  )
+
+  local response
+  response=$(curl -sSL "https://api.openai.com/v1/responses" \
+    -H "Authorization: Bearer ${API_KEY}" \
+    -H "Content-Type: application/json" \
+    -d "${payload}"
+  )
+
+  err="$(jq -r 'if .error != null then .error.message else empty end' <<< "${response}")"
+  [[ -n "${err}" ]] && echo "Error: ${err}" && exit 1
+
+  jq -r '.output[] | select(.type=="message") | .content[0].text' <<< "${response}"
+}
+
+msg="$(ask_openai "$(git_diff)")"
+git_commit "${msg}"
