@@ -85,5 +85,8 @@ ask_openai() {
   jq -r '.output[] | select(.type=="message") | .content[0].text' <<< "${response}"
 }
 
+JC_CONTEXT_DIR="${JC_CONTEXT_DIR:-}"
+[[ -n "${JC_CONTEXT_DIR}" ]] && cd "${JC_CONTEXT_DIR}"
+
 msg="$(ask_openai "$(git_diff)")"
 git_commit "${msg}"
