@@ -1,4 +1,35 @@
 #!/usr/bin/env bash
 
-# TODO: implement
-echo "not implemented" && exit 1
+set -euo pipefail
+
+JC_DIR="${HOME}/.jc"
+DOWNLOAD_URL=$(curl -sL https://api.github.com/repos/roboloop/jc/releases/latest | grep tarball_url | cut -d '"' -f4)
+
+echo "Installing to ${JC_DIR} directory..."
+mkdir -p "$JC_DIR"
+
+echo "Downloading the file from ${DOWNLOAD_URL}..."
+curl -sL "${DOWNLOAD_URL}" -o "${JC_DIR}/${TAG}.tar.gz"
+
+echo "Extracting files..."
+tar --strip-components=1 -xf "${JC_DIR}/${TAG}.tar.gz" --directory "${JC_DIR}"
+rm "${JC_DIR}/${TAG}.tar.gz"
+chmod +x "${JC_DIR}/jc"
+
+echo "Installation complete!"
+
+message=$(cat <<EOF
+To make the 'jc' command globally available, add the following line to your shell configuration file:
+
+  export PATH="\$HOME/.jc:\$PATH"
+
+For:
+  Bash    -> ~/.bashrc or ~/.bash_profile
+  Zsh     -> ~/.zshrc
+  Fish    -> ~/.config/fish/config.fish (use 'set -U fish_user_paths \$HOME/.jc \$fish_user_paths')
+
+Reload your shell configuration file or restart your terminal to apply changes
+EOF
+)
+
+echo "$message"

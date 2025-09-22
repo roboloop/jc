@@ -1,0 +1,39 @@
+JC_API_KEY=
+JC_MODEL=gpt-5-2025-08-07
+JC_GIT_DIFF_ARGS="
+:(exclude)*.lock
+:(exclude)*-lock.*
+"
+JC_MAX_INPUT_TOKENS=8192
+JC_MAX_OUTPUT_TOKENS=2048
+JC_LOG_FILE=
+
+# Do not forget to escape backslashes, quotes, backticks and dollar signs
+JC_INSTRUCTIONS="You write Git commit messages from diffs."
+
+# Do not forget to escape backslashes, quotes, backticks and dollar signs
+# Available placeholders: <diff>, <stat>
+JC_MESSAGE_TEMPLATE="<diff>"
+
+# Do not forget to escape backslashes, quotes, backticks and dollar signs
+JC_SAMPLE_INPUT="
+diff --git a/src/server.ts b/src/server.ts
+index ad4db42..f3b18a9 100644
+--- a/src/server.ts
++++ b/src/server.ts
+@@ -10,7 +10,7 @@
++    const PORT = 7799;
+@@ -34,6 +34,6 @@
+-    app.listen(7799, () => {
+-      console.log(\`Server listening on port 7799\`);
++    app.listen(process.env.PORT || PORT, () => {
++      console.log(\`Server listening on port \${PORT}\`);
+"
+
+# Do not forget to escape backslashes, quotes, backticks and dollar signs
+JC_SAMPLE_OUTPUT="
+Robust code refactoring
+
+- Add support running app on a configurable port via environment variable
+- Use PORT fallback to 7799 if not set
+"
