@@ -20,9 +20,8 @@ Feel free to write your own instructions for your projects.
 
 1. Install in `$HOME/.jc`
     
-   TODO: implement
    ```shell
-   echo "not implemented yet"
+   curl -sL https://raw.githubusercontent.com/roboloop/jc/refs/heads/main/install.sh | bash
    ```
 
 2. Make the program globally accessible by adding to the corresponding command to the shell-config
@@ -35,9 +34,19 @@ Feel free to write your own instructions for your projects.
 
    1. Global one: `$HOME/.jc/.jcrc`
 
-   2. Per project one: `awesome-project/.jcrc`
-   
-    > You can exclude `.jcrc` file in `.git/info/exclude`
+   2. Git project: `git-project/.jcrc`
+
+      > You can exclude `.jcrc` file in `.git/info/exclude`
+
+   3. Environment variables
+
+## Usage
+
+Just run `jc` in your terminal.
+
+```shell
+jc
+```
 
 ## Inspired by
 

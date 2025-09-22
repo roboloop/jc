@@ -2,37 +2,31 @@
 
 set -euo pipefail
 
-command -v git &> /dev/null || (echo "git not found" >&2 && exit 1)
-command -v curl &> /dev/null || (echo "curl not found" >&2 && exit 1)
-command -v jq &> /dev/null || (echo "jq not found" >&2 && exit 1)
-command -v python3 &> /dev/null || (echo "python3 not found" >&2 && exit 1)
-python3 -m pip show tiktoken >/dev/null 2>&1 || (echo "tiktoken not installed" >&2 && exit 1)
-
 info() { printf '%s %s\n' "[INFO]" "$*" >&2; }
 error() { printf '%s %s\n' "[ERROR]" "$*" >&2; }
 die() { error "$@"; exit 1; }
 
+command -v git &> /dev/null || die "git not found"
+command -v curl &> /dev/null || die "curl not found"
+command -v jq &> /dev/null || die "jq not found"
+command -v python3 &> /dev/null || die "python3 not found"
+python3 -m pip show tiktoken >/dev/null 2>&1 || die "tiktoken not installed"
+
+load_config_file() {
+  local file="$1"
+  # shellcheck source=/dev/null
+  test -f "${file}" && info "Loading config ${file}" && . "${file}"
+}
+
 load_config() {
   local config_file=".jcrc" config_loaded=
 
-  local global_config
-  global_config="${HOME}/.jc/${config_file}"
-  if [[ -f "${global_config}" ]]; then
-    info "Loading global config ${global_config}"
-    . "${global_config}"
-    config_loaded=t
-  fi
+  local global_config="${HOME}/.jc/${config_file}"
+  load_config_file "${global_config}" && config_loaded=1
 
-  if git rev-parse --show-toplevel > /dev/null 2>&1; then
-    local repo_dir local_config
-    repo_dir="$(git rev-parse --show-toplevel)"
-    local_config="${repo_dir}/${config_file}"
-    if [[ -n "${repo_dir}" && -f "${local_config}" ]]; then
-      info "Loading local config ${local_config}"
-      . "${local_config}"
-      config_loaded=t
-    fi
-  fi
+  local repo_config
+  repo_config="$(git -C "${CONTEXT_DIR}" rev-parse --show-toplevel)/${config_file}"
+  load_config_file "${repo_config}" && config_loaded=1
 
   [[ -z "${config_loaded}" ]] && info "No config loaded"
 
@@ -41,6 +35,7 @@ load_config() {
   MODEL="${JC_MODEL:?model is not set}"
   GIT_DIFF_ARGS="${JC_GIT_DIFF_ARGS:-}"
   INSTRUCTIONS="${JC_INSTRUCTIONS:?instructions are not set}"
+  MESSAGE_TEMPLATE="${JC_MESSAGE_TEMPLATE:?message templte is not set}"
   SAMPLE_INPUT="${JC_SAMPLE_INPUT:?sample input is not set}"
   SAMPLE_OUTPUT="${JC_SAMPLE_OUTPUT:?sample output is not set}"
   MAX_INPUT_TOKENS="${JC_MAX_INPUT_TOKENS:?max input tokens is not set}"
@@ -50,14 +45,11 @@ load_config() {
   return 0
 }
 
-load_config
-
 log_curl() {
-  local request="$1"
-  local response="$2"
-
   [[ -z "${LOG_FILE}" ]] && return
 
+  local request="$1"
+  local response="$2"
   printf '{"time":"%s","request":%s,"response":%s}\n' \
     "$(date '+%Y-%m-%dT%H:%M:%S%z')" \
     "$(printf '%s' "${request}" | jq -Rs .)" \
@@ -66,18 +58,17 @@ log_curl() {
 }
 
 print_stat() {
-  local dir indexed_names excluded_names
-  dir="$(git rev-parse --show-toplevel)"
-  indexed_names="$(eval "git -C \"${dir}\" diff --no-color --cached --name-only" | sort)"
-  excluded_names="$(eval "git -C \"${dir}\" diff --no-color --cached --name-only ${GIT_DIFF_ARGS}" | sort)"
+  local indexed_names excluded_names
+  indexed_names="$(git -C "${CONTEXT_DIR}" diff --no-color --cached --name-only | sort)"
+  excluded_names="$(git_diff_args | xargs -0 git -C "${CONTEXT_DIR}" diff --no-color --cached --name-only -- . | sort)"
 
   local excluded excluded_stat
   excluded="$(comm -23 <(echo "${indexed_names}") <(echo "${excluded_names}"))"
-  excluded_stat="$(xargs git -C "${dir}" --no-pager diff --color --cached --stat=80 -- <<< "${excluded}")"
+  excluded_stat="$(xargs git -C "${CONTEXT_DIR}" --no-pager diff --color --cached --stat=80 -- . <<< "${excluded}")"
 
   local indexed indexed_stat
   indexed="$(comm -12 <(echo "${indexed_names}") <(echo "${excluded_names}"))"
-  indexed_stat="$(xargs git -C "${dir}" --no-pager diff --color --cached --stat=80 -- <<< "${indexed}")"
+  indexed_stat="$(xargs git -C "${CONTEXT_DIR}" --no-pager diff --color --cached --stat=80 -- . <<< "${indexed}")"
 
   echo
   echo "Excluded files:"
@@ -88,42 +79,30 @@ print_stat() {
   [[ -n "${indexed_stat}" ]] && echo "${indexed_stat}" || echo "No files"
 }
 
-git_diff() {
-  local dir
-  dir="$(git rev-parse --show-toplevel)"
-  if git -C "${dir}" diff-index --cached --quiet HEAD; then
-    die "Nothing to commit"
-  fi
+git_diff_args() {
+  printf '%s\n' "${GIT_DIFF_ARGS}" | awk 'NF && $1 !~ /^#/ { printf "%s\0", $0 }'
+}
 
-  cmd="git -C \"${dir}\" diff --no-color --staged ${GIT_DIFF_ARGS}"
-  eval "${cmd}"
+git_diff() {
+  git_diff_args | xargs -0 git -C "${CONTEXT_DIR}" --no-pager diff --no-color --staged -- .
 }
 
 git_stat() {
-  local dir
-  dir="$(git rev-parse --show-toplevel)"
-  if git -C "${dir}" diff-index --cached --quiet HEAD; then
-    die "Nothing to commit"
-  fi
-
-  cmd="git -C \"${dir}\" diff --no-color --staged --numstat --name-status ${GIT_DIFF_ARGS}"
-  eval "${cmd}"
+  git_diff_args | xargs -0 git -C "${CONTEXT_DIR}" --no-pager diff --no-color --staged --numstat -- .
 }
 
 git_commit() {
-  local message="$1"
-  dir="$(git rev-parse --show-toplevel)"
-  git -C "${dir}" commit -m "${message}"
+  local commit="$1"
+  git -C "${CONTEXT_DIR}" commit -m "${commit}"
 }
 
 git_edit_commit() {
-  local message="$1"
-  dir="$(git rev-parse --show-toplevel)"
-  git -C "${dir}" commit --edit -F <(echo "${message}")
+  local commit="$1"
+  git -C "${CONTEXT_DIR}" commit --edit -F <(echo "${commit}")
 }
 
 input_tokens() {
-  local diff="$1"
+  local message="$1"
 MODEL="${MODEL}" python3 <(cat <<'PY'
 import sys, os, tiktoken
 model = os.environ.get("MODEL", "")
@@ -131,22 +110,11 @@ enc = tiktoken.encoding_for_model(model)
 text = sys.stdin.read()
 print(len(enc.encode(text)))
 PY
-) <<< "${diff} ${INSTRUCTIONS} ${SAMPLE_INPUT} ${SAMPLE_OUTPUT}"
+) <<< "${message} ${INSTRUCTIONS} ${SAMPLE_INPUT} ${SAMPLE_OUTPUT}"
 }
 
 ask_openai() {
-  local diff="$1"
-  local stat="$2"
-  local formatted
-  formatted="
-  Here is the staged diff and diffstat. Generate 1 commit message.
-
-  DIFFSTAT:
-  ${stat}
-
-  DIFF (context-free, minimal):
-  ${diff}
-"
+  local message="$1"
 
   info "Sending request"
   local request
@@ -156,7 +124,7 @@ ask_openai() {
     --arg instructions "${INSTRUCTIONS}" \
     --arg sampleInput "${SAMPLE_INPUT}" \
     --arg sampleOutput "${SAMPLE_OUTPUT}" \
-    --arg diff "${formatted}" '
+    --arg message "${message}" '
 {
   model: $model,
   max_output_tokens: $maxOutputTokens,
@@ -164,7 +132,7 @@ ask_openai() {
     { role: "system",    content: [ { type: "input_text", text: $instructions } ] },
     { role: "user",      content: [ { type: "input_text", text: $sampleInput } ] },
     { role: "assistant", content: [ { type: "output_text", text: $sampleOutput } ] },
-    { role: "user",      content: [ { type: "input_text", text: $diff } ] }
+    { role: "user",      content: [ { type: "input_text", text: $message } ] }
   ]
 }'
   )
@@ -185,30 +153,30 @@ ask_openai() {
 }
 
 ask_ai() {
-  local diff="$1"
-  local stat="$2"
+  local message="$1"
   case "${MODEL}" in
-    gpt*) ask_openai "${diff}" "${stat}" ;;
-    *) error "no provider found"
-       return 1 ;;
+    gpt*) ask_openai "${message}" ;;
+    *) die "no provider found" ;;
   esac
 }
 
 main() {
   print_stat
 
-  local diff stat tokens
+  local diff stat message tokens
   diff="$(git_diff)"
   stat="$(git_stat)"
-  tokens=$(input_tokens "${diff}")
+  message="${MESSAGE_TEMPLATE//<stat>/$stat}"
+  message="${message//<diff>/$diff}"
+  tokens=$(input_tokens "${message}")
   [[ "${tokens}" -ge "${MAX_INPUT_TOKENS}" ]] && die "Number of input tokens (${tokens}) exceeds ${MAX_INPUT_TOKENS}"
   info "Required ${tokens} input tokens"
 
-  local message
-  message="$(ask_ai "${diff}" "${stat}")"
-  echo "Generated message:"
+  local commit
+  commit="$(ask_ai "${message}")"
+  echo "Generated commit message:"
   echo
-  echo "${message}"
+  echo "${commit}"
   echo
 
   local answer
@@ -221,8 +189,8 @@ main() {
     echo "${answer}"
 
     case "${answer}" in
-      [cC]) git_commit "${message}"; break ;;
-      [eE]) git_edit_commit "${message}"; break ;;
+      [cC]) git_commit "${commit}"; break ;;
+      [eE]) git_edit_commit "${commit}"; break ;;
       [nN]) main "$@"; break ;;
       [aA]) exit 1 ;;
       *) echo "Invalid choice, try again." ;;
@@ -230,8 +198,11 @@ main() {
   done
 }
 
-JC_CONTEXT_DIR="${JC_CONTEXT_DIR:-}"
-[[ -n "${JC_CONTEXT_DIR}" ]] && info "Running in context of ${JC_CONTEXT_DIR}" && cd "${JC_CONTEXT_DIR}"
+# Setup the context before any run
+CONTEXT_DIR="${JC_CONTEXT_DIR:-.}"
+git -C "${CONTEXT_DIR}" rev-parse --git-dir > /dev/null 2>&1 || die "Git repo not found"
+git -C "${CONTEXT_DIR}" diff-index --cached --quiet HEAD && die "Nothing to commit"
+
+load_config
 
 main "$@"
-
