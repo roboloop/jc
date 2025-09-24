@@ -58,37 +58,34 @@ log_curl() {
 }
 
 print_stat() {
-  local indexed_names excluded_names
+  local indexed_names included_names excluded_names
   indexed_names="$(git -C "${CONTEXT_DIR}" diff --no-color --cached --name-only | sort)"
-  excluded_names="$(git_diff_args | xargs -0 git -C "${CONTEXT_DIR}" diff --no-color --cached --name-only -- . | sort)"
+  included_names="$(git_diff_xargs | xargs git -C "${CONTEXT_DIR}" --no-pager diff --no-color --cached --name-only -- . | sort)"
+  excluded_names="$(comm -23 <(printf "%s\n" "${indexed_names}") <(printf "%s\n" "${included_names}"))"
 
-  local excluded excluded_stat
-  excluded="$(comm -23 <(echo "${indexed_names}") <(echo "${excluded_names}"))"
-  excluded_stat="$(xargs git -C "${CONTEXT_DIR}" --no-pager diff --color --cached --stat=80 -- . <<< "${excluded}")"
+  printf "\n%s\n" "Excluded files: "
+  [[ -z "${excluded_names}" ]] && printf " %s\n" "(no files)"
+  [[ -n "${excluded_names}" ]] && xargs git -C "${CONTEXT_DIR}" --no-pager diff --color --cached --stat=80 -- <<< "${excluded_names}"
 
-  local indexed indexed_stat
-  indexed="$(comm -12 <(echo "${indexed_names}") <(echo "${excluded_names}"))"
-  indexed_stat="$(xargs git -C "${CONTEXT_DIR}" --no-pager diff --color --cached --stat=80 -- . <<< "${indexed}")"
-
-  echo
-  echo "Excluded files:"
-  [[ -n "${excluded_stat}" ]] && echo "${excluded_stat}" || echo "No files"
-
-  echo
-  echo "Indexed files:"
-  [[ -n "${indexed_stat}" ]] && echo "${indexed_stat}" || echo "No files"
+  printf "\n%s\n" "Included files: "
+  [[ -z "${included_names}" ]] && printf  "%s\n" "(no files)"
+  [[ -n "${included_names}" ]] && xargs git -C "${CONTEXT_DIR}" --no-pager diff --color --cached --stat=80 -- <<< "${included_names}"
 }
 
-git_diff_args() {
-  printf '%s\n' "${GIT_DIFF_ARGS}" | awk 'NF && $1 !~ /^#/ { printf "%s\0", $0 }'
+git_diff_xargs() {
+  grep -vE '^[[:space:]]*$' <<< "${GIT_DIFF_ARGS}"
 }
 
 git_diff() {
-  git_diff_args | xargs -0 git -C "${CONTEXT_DIR}" --no-pager diff --no-color --staged -- .
+  git_diff_xargs | xargs git -C "${CONTEXT_DIR}" --no-pager diff --irreversible-delete --no-color --staged -- .
 }
 
 git_stat() {
-  git_diff_args | xargs -0 git -C "${CONTEXT_DIR}" --no-pager diff --no-color --staged --numstat -- .
+  git_diff_xargs | xargs git -C "${CONTEXT_DIR}" --no-pager diff --no-color --staged --numstat -- .
+}
+
+git_messages() {
+  git -C "${CONTEXT_DIR}" --no-pager log -n 10 --pretty=format:"%s"
 }
 
 git_commit() {
@@ -102,7 +99,6 @@ git_edit_commit() {
 }
 
 input_tokens() {
-  local message="$1"
 MODEL="${MODEL}" python3 <(cat <<'PY'
 import sys, os, tiktoken
 model = os.environ.get("MODEL", "")
@@ -110,17 +106,29 @@ enc = tiktoken.encoding_for_model(model)
 text = sys.stdin.read()
 print(len(enc.encode(text)))
 PY
-) <<< "${message} ${INSTRUCTIONS} ${SAMPLE_INPUT} ${SAMPLE_OUTPUT}"
+) <<< "$@"
+}
+
+copy() {
+  local text="$1"
+  printf "%s" "${text}" | (
+    command -v xclip && xclip -selection clipboard && return
+    command -v xsel && xsel --clipboard && return
+    command -v pbcopy && pbcopy && return
+  ) &> /dev/null
 }
 
 ask_openai() {
   local message="$1"
+  local prompt_cache_key
+  prompt_cache_key="key-$(printf "%s%s%s" "${INSTRUCTIONS}" "${SAMPLE_INPUT}" "${SAMPLE_OUTPUT}" | cksum | cut -d' ' -f1)"
 
   info "Sending request"
   local request
   request=$(jq -n \
     --arg model "${MODEL}" \
     --argjson maxOutputTokens "${MAX_OUTPUT_TOKENS}" \
+    --arg promptCacheKey "${prompt_cache_key}" \
     --arg instructions "${INSTRUCTIONS}" \
     --arg sampleInput "${SAMPLE_INPUT}" \
     --arg sampleOutput "${SAMPLE_OUTPUT}" \
@@ -128,6 +136,7 @@ ask_openai() {
 {
   model: $model,
   max_output_tokens: $maxOutputTokens,
+  prompt_cache_key: $promptCacheKey,
   input: [
     { role: "system",    content: [ { type: "input_text", text: $instructions } ] },
     { role: "user",      content: [ { type: "input_text", text: $sampleInput } ] },
@@ -152,6 +161,12 @@ ask_openai() {
   jq -r '.output[] | select(.type=="message") | .content[0].text' <<< "${response}"
 }
 
+ask_chatgpt() {
+  local message="$1"
+
+  copy "${message}"
+}
+
 ask_ai() {
   local message="$1"
   case "${MODEL}" in
@@ -166,9 +181,12 @@ main() {
   local diff stat message tokens
   diff="$(git_diff)"
   stat="$(git_stat)"
+  messages="$(git_messages)"
+
   message="${MESSAGE_TEMPLATE//<stat>/$stat}"
   message="${message//<diff>/$diff}"
-  tokens=$(input_tokens "${message}")
+  message="${message//<messages>/$messages}"
+  tokens=$(input_tokens "${INSTRUCTIONS}" "${SAMPLE_INPUT}" "${SAMPLE_OUTPUT}" "${message}")
   [[ "${tokens}" -ge "${MAX_INPUT_TOKENS}" ]] && die "Number of input tokens (${tokens}) exceeds ${MAX_INPUT_TOKENS}"
   info "Required ${tokens} input tokens"
 
@@ -181,7 +199,7 @@ main() {
 
   local answer
   while :; do
-    echo -n "Choose action: [c]onfirm, [e]dit, [n]ew, [a]bort: "
+    echo -n "Choose action: [c]onfirm, [e]dit, [n]ew, co[p]y, [a]bort: "
 
     stty -echo -icanon time 0 min 1
     IFS= read -r -n1 answer
@@ -192,6 +210,7 @@ main() {
       [cC]) git_commit "${commit}"; break ;;
       [eE]) git_edit_commit "${commit}"; break ;;
       [nN]) main "$@"; break ;;
+      [pP]) copy "${commit}"; break ;;
       [aA]) exit 1 ;;
       *) echo "Invalid choice, try again." ;;
     esac
@@ -201,7 +220,9 @@ main() {
 # Setup the context before any run
 CONTEXT_DIR="${JC_CONTEXT_DIR:-.}"
 git -C "${CONTEXT_DIR}" rev-parse --git-dir > /dev/null 2>&1 || die "Git repo not found"
-git -C "${CONTEXT_DIR}" diff-index --cached --quiet HEAD && die "Nothing to commit"
+against=HEAD
+git -C "${CONTEXT_DIR}" rev-parse --verify --quiet HEAD >/dev/null || against="$(git hash-object -t tree /dev/null)"
+git -C "${CONTEXT_DIR}" diff-index --cached --quiet "${against}" && die "Nothing to commit"
 
 load_config
 
